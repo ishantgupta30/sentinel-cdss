@@ -1,0 +1,7 @@
+.env
+venv/
+__pycache__/
+*.pyc
+dev.db
+audit_chain.jsonl
+.DS_Store
