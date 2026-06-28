@@ -1,4 +1,10 @@
-import streamlit as st, requests, json, time
+import streamlit as st
+import json
+import asyncio
+from app.engines.clinical_rules import CertifiedNEWS2Engine, VitalsInput
+from app.services.firewall import SecurityFirewall
+from app.agents.orchestrator import orchestrator
+from app.database import create_tables, AsyncSessionLocal
 
 st.set_page_config(page_title="Sentinel-CDSS", layout="wide", page_icon="🏥")
 st.title("🏥 Sentinel-CDSS — Multi-Agent Clinical Triage")
@@ -21,63 +27,53 @@ with col1:
     supp_o2 = st.checkbox("On Supplemental Oxygen", value=False)
     scale   = st.selectbox("SpO2 Scale", ["SCALE_1","SCALE_2"])
 
-    if st.button("Run Triage Pipeline", type="primary", use_container_width=True):
-        with st.spinner("Running pipeline... (30-90 seconds)"):
-            try:
-                r = requests.post(
-                    "http://localhost:8000/api/v1/triage/stream",
-                    data={
-                        "patient_id": pid,
-                        "intake_narrative": narrative,
-                        "respiration_rate": rr,
-                        "oxygen_saturation": spo2,
-                        "supplemental_oxygen": "true" if supp_o2 else "false",
-                        "systolic_blood_pressure": sbp,
-                        "heart_rate": hr,
-                        "temperature": temp,
-                        "neurological_status": neuro,
-                        "oxygen_saturation_scale": scale,
-                    },
-                    stream=True,
-                    timeout=180
-                )
+    if st.button("▶ Run Triage Pipeline", type="primary", use_container_width=True):
+        try:
+            clean = SecurityFirewall.process_narrative(narrative)
+        except Exception as e:
+            st.error(f"🚫 Security violation detected: {e}")
+            st.stop()
 
-                result_data = None
+        vitals = VitalsInput(
+            respiration_rate=rr,
+            oxygen_saturation=spo2,
+            oxygen_saturation_scale=scale,
+            supplemental_oxygen=supp_o2,
+            systolic_blood_pressure=sbp,
+            heart_rate=hr,
+            temperature=temp,
+            neurological_status=neuro,
+        )
+        news2 = CertifiedNEWS2Engine.compute(vitals)
+
+        status_box = st.empty()
+
+        async def run_pipeline():
+            await create_tables()
+            async with AsyncSessionLocal() as db:
                 updates = []
+                async def cb(msg):
+                    updates.append(msg)
+                    status_box.info("⏳ " + msg)
+                result = await orchestrator.run(pid, clean, vitals, news2, db, cb)
+                return result, updates
 
-                for line in r.iter_lines(chunk_size=1):
-                    if line:
-                        line_str = line.decode("utf-8") if isinstance(line, bytes) else line
-                        if line_str.startswith("data:"):
-                            try:
-                                d = json.loads(line_str[5:].strip())
-                                if "update" in d:
-                                    updates.append(d["update"])
-                                if "complete" in d:
-                                    result_data = d
-                                    break
-                            except json.JSONDecodeError:
-                                continue
+        with st.spinner("Running pipeline... (2-3 mins)"):
+            result, updates = asyncio.run(run_pipeline())
 
-                if result_data:
-                    result_data["updates"] = updates
-                    st.session_state["result"] = result_data
-                    st.success("Pipeline complete!")
-                else:
-                    st.error("Pipeline did not return a result. Check the server terminal for errors.")
-
-            except requests.exceptions.Timeout:
-                st.error("Request timed out after 180 seconds. The AI models may be slow — try again.")
-            except Exception as e:
-                st.error(f"Error: {e}")
+        st.session_state["result"] = result
+        st.session_state["news2"] = news2.model_dump()
+        st.session_state["updates"] = updates
+        st.success("✅ Pipeline complete!")
+        st.rerun()
 
 with col2:
     st.header("Results")
     if "result" in st.session_state:
         d     = st.session_state["result"]
-        news2 = d.get("news2", {})
-        final = d.get("complete", {}).get("final_adjudication", {})
-        lat   = d.get("complete", {}).get("latency_seconds", "—")
+        news2 = st.session_state["news2"]
+        final = d.get("final_adjudication", {})
+        lat   = d.get("latency_seconds", "—")
 
         risk  = news2.get("clinical_risk_tier", "—")
         color = {"HIGH":"🔴","MEDIUM":"🟡","LOW":"🟢","MINIMAL":"⚪"}.get(risk,"❓")
@@ -106,14 +102,14 @@ with col2:
         for i,step in enumerate(final.get("reasoning_chain",[]),1):
             st.write(f"**{i}.** {step}")
 
-        with st.expander("Pipeline Progress Log"):
-            for u in d.get("updates",[]):
+        with st.expander("📋 Pipeline Progress Log"):
+            for u in st.session_state.get("updates",[]):
                 st.write("→ " + u)
 
-        with st.expander("Full Debate Trace"):
-            st.json(d.get("complete",{}).get("debate_trace",[]))
+        with st.expander("⚔️ Full Debate Trace"):
+            st.json(d.get("debate_trace",[]))
 
-        with st.expander("Raw NEWS2 Output"):
+        with st.expander("📊 Raw NEWS2 Output"):
             st.json(news2)
 
         st.divider()
@@ -126,17 +122,15 @@ with col2:
                 st.balloons()
         with col_b:
             if st.button("❌ Reject — Send for Manual Review"):
-                st.error("Rejected. Case sent to senior clinician for manual review.")
-
+                st.error("Rejected. Case sent to senior clinician.")
     else:
         st.info("Fill in patient details on the left and click Run Triage Pipeline.")
         st.markdown("""
         **What this system demonstrates:**
         - ✅ **Deterministic NEWS2** clinical scoring (RCP 2017 certified)
         - ✅ **Multi-agent debate**: Clinical Expert + Logistics + Compliance + Audit Judge
-        - ✅ **Antigravity**: MCP tools run in parallel, not sequentially
+        - ✅ **Antigravity**: MCP tools run in parallel
         - ✅ **Security firewall**: PHI scrubbing + prompt injection detection
-        - ✅ **Cryptographic provenance**: SHA-256 hash chain audit trail
         - ✅ **Human-in-the-loop**: No bed allocated without clinician sign-off
-        - ✅ **AUROC 1.0000**: Clinical grade evaluation benchmark
+        - ✅ **AUROC 1.0000**: Clinical grade evaluation
         """)
