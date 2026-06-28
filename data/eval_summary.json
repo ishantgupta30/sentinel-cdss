@@ -1,0 +1,16 @@
+{
+  "dataset": "Kaggle Heart Failure Prediction (fedesoriano)",
+  "license": "ODbL-1.0",
+  "n_patients": 918,
+  "critical_cases_pct": 55.3,
+  "accuracy": 0.877,
+  "sensitivity": 0.904,
+  "specificity": 0.844,
+  "precision": 0.878,
+  "f1_score": 0.890,
+  "auroc": 0.9356,
+  "brier_score": 0.0954,
+  "gender_bias_gap": 0.0115,
+  "age_bias_gap": 0.0124,
+  "overall": "CLINICAL GRADE"
+}
